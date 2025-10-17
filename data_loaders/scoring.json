@@ -1,0 +1,76 @@
+{
+  "Scoring": {
+    "Passing": {
+      "PassingYards_PY": 0.04,
+      "TouchdownPass_PTD": 4,
+      "InterceptionsThrown_INT": -2,
+      "TwoPointPassingConversion_2PC": 2
+    },
+    "Rushing": {
+      "RushingYards_RY": 0.1,
+      "TouchdownRush_RTD": 6,
+      "TwoPointRushingConversion_2PR": 2
+    },
+    "Receiving": {
+      "ReceivingYards_REY": 0.1,
+      "Reception_REC": 0.5,
+      "TouchdownReception_RETD": 6,
+      "TwoPointReceivingConversion_2PRE": 2
+    },
+    "Kicking": {
+      "PATMade_PAT": 1,
+      "PATMissed_PATM": -1,
+      "FieldGoalMade_0_39_FG0": 3,
+      "FieldGoalMade_40_49_FG40": 4,
+      "FieldGoalMissed_0_39_FGM0": -1,
+      "FieldGoalMade_50_59_FG50": 5,
+      "FieldGoalMade_60Plus_FG60": 5
+    },
+    "TeamDefenseSpecialTeams": {
+      "KickoffReturnTD_KRTD": 8,
+      "PuntReturnTD_PRTD": 8,
+      "InterceptionReturnTD_INTTD": 8,
+      "FumbleReturnTD_FRTD": 8,
+      "BlockedKickReturnTD_BLKKRTD": 8,
+      "TwoPointReturn_2PTRET": 4,
+      "Sack_SK": 1,
+      "BlockedKick_BLKK": 3,
+      "Interception_INT": 2,
+      "FumbleRecovered_FR": 1,
+      "FumbleForced_FF": 1,
+      "Safety_SF": 4,
+      "Stuffs_ST": 0.5,
+      "PassesDefensed_PD": 0.25,
+      "PointsAllowed_7_13_PA7": -1,
+      "PointsAllowed_14_17_PA14": -2,
+      "PointsAllowed_18_21_PA18": -3,
+      "PointsAllowed_22_27_PA22": -4,
+      "PointsAllowed_28_34_PA28": -5,
+      "PointsAllowed_35_45_PA35": -6,
+      "PointsAllowed_46Plus_PA46": -7,
+      "YardsAllowed_300_349_YA349": -1,
+      "YardsAllowed_350_399_YA399": -2,
+      "YardsAllowed_400_449_YA449": -3,
+      "YardsAllowed_450_499_YA499": -4,
+      "YardsAllowed_500_549_YA549": -5,
+      "YardsAllowed_550Plus_YA550": -6
+    },
+    "Miscellaneous": {
+      "KickoffReturnTD_KRTD": 6,
+      "PuntReturnTD_PRTD": 6,
+      "FumbleRecoveredForTD_FTD": 6,
+      "TotalFumblesLost_FUML": -2,
+      "FumbleReturnTD_FRTD": 6,
+      "TwoPointReturn_2PTRET": 2,
+      "OnePointSafety_1PSF": 1
+    },
+    "HeadCoach": {
+      "WinMargin_25Plus_WM25": 10,
+      "WinMargin_20_24_WM20": 8,
+      "WinMargin_15_19_WM15": 6,
+      "WinMargin_10_14_WM10": 4,
+      "WinMargin_5_9_WM5": 2,
+      "WinMargin_1_4_WM1": 1
+    }
+  }
+}
