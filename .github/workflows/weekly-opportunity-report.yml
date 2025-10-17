@@ -12,33 +12,62 @@ permissions:
 jobs:
   generate-report:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-          # use GITHUB_TOKEN or replace with your PAT secret
-          token: ${{ github.token }}
-          persist-credentials: true
-    
+        # use the default GITHUB_TOKEN; ensure repository Actions permissions allow write (we set permissions above)
+        token: ${{ secrets.GITHUB_TOKEN }}
+        persist-credentials: true
+        fetch-depth: 0
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-    
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install nflreadpy polars
-    
+
     - name: Run opportunity report
       run: |
         python data_loaders/opportunity_report.py 2025 --output-dir ./reports
-    
-    - name: Commit and push if changes
+
+    - name: "Debug: show files and git state"
       run: |
-        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        echo "PWD: $(pwd)"
+        echo "Listing reports directory"
+        ls -la reports || true
+        echo "If CSVs exist, show a sample"
+        for f in reports/*.csv; do echo "---- $f ----"; head -n 20 "$f" || true; done
+        echo "Check if the files are ignored by git:"
+        git check-ignore -v reports/*.csv || true
+        echo "Git status:"
+        git status --porcelain --untracked-files=all || true
+
+    - name: Configure git
+      run: |
+        git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
-        git add reports/*.csv
-        git diff --staged --quiet || git commit -m "Update opportunity reports - $(date +'%Y-%m-%d')"
-        git push
+
+    - name: Commit generated file(s) if changed
+      run: |
+        # Stage any new/changed CSVs in reports/
+        git add -A reports || true
+        # Show what is staged
+        git diff --staged --name-only || true
+        # Commit if there are staged changes
+        git commit -m "chore: update opportunity reports - $(date -u +'%Y-%m-%d')" || echo "No changes to commit"
+
+    - name: Push changes to the current branch
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Determine branch name for scheduled/manual runs
+        BRANCH_NAME="${{ github.ref_name }}"
+        echo "Pushing to branch: $BRANCH_NAME"
+        # Push to the branch the workflow is running on
+        git push origin HEAD:"${BRANCH_NAME}" || (echo "git push failed — check branch protection, permissions, or if workflow is from a fork"; git remote -v; git branch -vv; exit 1)
