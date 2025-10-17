@@ -26,7 +26,7 @@ jobs:
     
     - name: Run opportunity report
       run: |
-        python opportunity_report.py 2025 --output-dir ./reports
+        python data_loaders/opportunity_report.py 2025 --output-dir ./reports
     
     - name: Commit and push if changes
       run: |
