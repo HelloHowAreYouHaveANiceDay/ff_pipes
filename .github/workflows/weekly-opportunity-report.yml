@@ -6,6 +6,9 @@ on:
     - cron: '0 8 * * 2'
   workflow_dispatch: # Allows manual trigger from GitHub Actions tab
 
+permissions:
+  contents: write
+
 jobs:
   generate-report:
     runs-on: ubuntu-latest
@@ -13,6 +16,10 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+          # use GITHUB_TOKEN or replace with your PAT secret
+          token: ${{ github.token }}
+          persist-credentials: true
     
     - name: Set up Python
       uses: actions/setup-python@v5
