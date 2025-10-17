@@ -1,29 +1,22 @@
-name: Weekly Opportunity Report
-
 on:
   schedule:
-    # Run every Tuesday at 8:00 AM UTC (adjust time as needed)
-    - cron: '0 8 * * 2'
+    - cron: '0 6 * * 1'
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   generate-report:
     runs-on: ubuntu-latest
-
-    env:
-      # Optional: set PERSONAL_TOKEN in repo secrets if runs ever come from forks or you need a PAT for push
-      PAT: ${{ secrets.PERSONAL_TOKEN || '' }}
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          persist-credentials: true
+          token: ${{ github.token }}
           fetch-depth: 0
+          # optional: lock to your default branch explicitly
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,93 +30,29 @@ jobs:
 
       - name: Run opportunity report
         run: |
-          set -x
+          mkdir -p reports
           python data_loaders/opportunity_report.py 2025 --output-dir ./reports
 
-      - name: Debug: show files and git state
+      - name: Commit and push if changes
+        shell: bash
         run: |
-          set -x
-          echo "PWD: $(pwd)"
-          echo "GITHUB_REF: $GITHUB_REF"
-          echo "Listing reports directory"
-          ls -la reports || true
-          echo "Show sample of CSVs if present"
-          for f in reports/*.csv; do echo "---- $f ----"; head -n 50 "$f" || true; done
-          echo "Check whether git ignores these files:"
-          git check-ignore -v reports/* || true
-          echo "Git status (untracked + changes):"
-          git status --porcelain --untracked-files=all || true
-          echo "Git ls-files (to see what git currently tracks):"
-          git ls-files | sed -n '1,200p' || true
-
-      - name: Configure git
-        run: |
+          git config --local user.name  "github-actions[bot]"
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
 
-      - name: Stage and show changes
-        run: |
-          set -x
-          # Stage any new/changed files under reports/
-          git add -A reports || true
-          echo "Staged files:"
-          git diff --staged --name-only || true
-          echo "Full git status after staging:"
-          git status --porcelain --untracked-files=all || true
-
-      - name: Commit generated file(s) if changed
-        run: |
-          set -x
-          # Commit if there are staged changes; show commit output
-          if git diff --staged --quiet; then
-            echo "No staged changes to commit"
+          # Be resilient if no files match the glob
+          shopt -s nullglob
+          files=(reports/*.csv)
+          if (( ${#files[@]} )); then
+            git add "${files[@]}"
           else
-            git commit -m "chore: update opportunity reports - $(date -u +'%Y-%m-%d')" --verbose
-            echo "Commit created:"
-            git --no-pager log -n 1 --pretty=fuller
+            echo "No new CSVs to add."
           fi
 
-      - name: Push changes (handles scheduled runs and optional PAT)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PAT: ${{ secrets.PERSONAL_TOKEN || '' }}
-        run: |
-          set -x
-          # Compute branch name from GITHUB_REF (works for schedule/workflow_dispatch/push contexts)
-          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
-          if [ -z "$BRANCH_NAME" ]; then
-            echo "GITHUB_REF is empty or not a branch ref; defaulting to main"
-            BRANCH_NAME="main"
-          fi
-          echo "Resolved branch: $BRANCH_NAME"
-
-          # If a PAT secret is provided, use it to set the remote (useful for forked PRs or repos with restricted GITHUB_TOKEN)
-          if [ -n "$PAT" ]; then
-            echo "Using PAT for push (PERSONAL_TOKEN secret present)"
-            git remote set-url origin "https://x-access-token:${PAT}@github.com/${{ github.repository }}.git"
+          # Only commit when there are staged changes
+          if ! git diff --staged --quiet; then
+            git commit -m "Update opportunity reports - $(date +'%Y-%m-%d')"
+            # Push from detached HEAD directly to main
+            git push origin HEAD:main
           else
-            echo "Using GITHUB_TOKEN for push"
-            # ensure origin uses https so persist-credentials can apply
-            git remote set-url origin "https://github.com/${{ github.repository }}.git" || true
-          fi
-
-          # Show current branch/HEAD info
-          git rev-parse --abbrev-ref HEAD || git rev-parse --short HEAD
-          git branch -vv || true
-
-          # Attempt push to the branch; print output for troubleshooting
-          if git rev-parse --verify HEAD >/dev/null 2>&1; then
-            git push origin HEAD:"${BRANCH_NAME}" --follow-tags || (
-              echo "git push failed. Possible reasons: branch protection, non-fast-forward, permissions, or this run was triggered from a fork.";
-              echo "git remote -v:"
-              git remote -v || true
-              echo "git branch -vv:"
-              git branch -vv || true
-              echo "Last 10 commits:"
-              git --no-pager log -n 10 --oneline || true
-              exit 1
-            )
-            echo "Push succeeded"
-          else
-            echo "No commit to push (no HEAD). Nothing to do."
+            echo "No changes to commit."
           fi
