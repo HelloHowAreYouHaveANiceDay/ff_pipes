@@ -147,6 +147,37 @@ def process_snap_counts(seasons, players_df):
     return snap_final
 
 
+def calculate_team_targets(pbp_data):
+    """
+    Calculate total targets per team per game from play-by-play data.
+    
+    Args:
+        pbp_data: Play-by-play DataFrame
+        
+    Returns:
+        Polars DataFrame with game_id, team, and team_targets
+    """
+    print("  Calculating team targets per game...")
+    
+    # Get all passing plays with a receiver
+    passing_plays = pbp_data.filter(
+        pl.col('receiver_player_id').is_not_null()
+    )
+    
+    # Count targets (pass attempts to receivers) by team and game
+    team_targets = (
+        passing_plays
+        .group_by(['game_id', 'posteam'])
+        .agg([
+            pl.col('pass_attempt').sum().alias('team_targets')
+        ])
+        .rename({'posteam': 'team'})
+    )
+    
+    print(f"    Calculated targets for {len(team_targets)} team-game combinations")
+    return team_targets
+
+
 def aggregate_pbp_stats(seasons, players_df):
     """
     Aggregate play-by-play data to get per-player per-game stats.
@@ -249,6 +280,9 @@ def aggregate_pbp_stats(seasons, players_df):
     
     print(f"    {len(rushing_stats)} rushing records")
     
+    # === CALCULATE TEAM TARGETS ===
+    team_targets = calculate_team_targets(pbp_data)
+    
     # === COMBINE ALL STATS ===
     print("  Combining all stats...")
     
@@ -268,6 +302,21 @@ def aggregate_pbp_stats(seasons, players_df):
             coalesce=True
         )
     )
+    
+    # Join team targets for target_share calculation
+    combined = combined.join(
+        team_targets,
+        on=['game_id', 'team'],
+        how='left'
+    )
+    
+    # Calculate target_share
+    combined = combined.with_columns([
+        pl.when(pl.col('team_targets') > 0)
+            .then(pl.col('targets') / pl.col('team_targets'))
+            .otherwise(None)
+            .alias('target_share')
+    ])
     
     print(f"  Combined PBP stats: {len(combined)} player-game records")
     return combined
@@ -741,6 +790,7 @@ def generate_opportunity_report(seasons):
         'avg_separation',
         'percent_share_of_intended_air_yards',
         'targets',
+        'target_share',
         'catch_percentage',
         'avg_yac',
         'avg_expected_yac',
