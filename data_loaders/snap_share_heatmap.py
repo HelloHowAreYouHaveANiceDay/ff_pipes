@@ -216,7 +216,7 @@ def create_heatmap(
     
     # Calculate figure size based on data dimensions
     n_rows, n_cols = expanded_snap_matrix.shape
-    fig_width = max(8, n_cols * 0.4)  # Reduced from 0.6 to 0.4 for narrower cells
+    fig_width = max(8, n_cols * 0.3)  # Reduced from 0.6 to 0.3 (2x narrower)
     fig_height = max(8, n_rows * 0.20)
     
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
