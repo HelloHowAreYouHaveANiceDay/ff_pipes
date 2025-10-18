@@ -298,7 +298,7 @@ def create_heatmap(
     add_grouping_lines(ax, expanded_grouping, n_cols)
     
     # Add title
-    ax.set_title('2025 Offensive Snap Share by Week - Skill Positions\n(QB: Comp%, RB: Targets/Rush 1st D, WR/TE: Targets/Avg YAC)', 
+    ax.set_title('2025 Offensive Snap Share by Week - Skill Positions\n(QB: Comp%, RB: Targets/Rush 1st Down, WR/TE: Targets/Avg YAC)', 
                  fontsize=14, fontweight='bold', pad=20)
     
     # Add annotations - percentages for snap share, metric values for metric rows
