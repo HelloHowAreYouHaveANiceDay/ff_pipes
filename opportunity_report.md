@@ -78,6 +78,7 @@ class OpportunityReportObject:
     avg_separation: float # nextgen
     percent_share_of_intended_air_yards: float # nextgen
     targets: int # number of targets for the receiver
+    target_share: float # receiver's targets / all targets from the receiver's team in that game
     catch_percentage: float
     avg_yac: float # average yards after catch
     avg_expected_yac: float
