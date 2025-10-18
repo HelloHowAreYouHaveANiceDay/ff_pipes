@@ -39,7 +39,10 @@ def load_and_filter_data(csv_path: str, min_games: int = 3) -> pl.DataFrame:
         'player_name',
         'offense_snap_share',
         'targets',
-        'percent_share_of_intended_air_yards'
+        'percent_share_of_intended_air_yards',
+        'avg_yac',
+        'rush_first_downs',
+        'completion_percentage'
     ])
     
     # Remove rows with null snap share
@@ -52,7 +55,7 @@ def load_and_filter_data(csv_path: str, min_games: int = 3) -> pl.DataFrame:
     
     valid_players = player_game_counts.filter(
         pl.col('games_played') >= min_games
-    )['player_name']
+    )['player_name'].to_list()
     
     df = df.filter(pl.col('player_name').is_in(valid_players))
     
@@ -86,7 +89,7 @@ def create_composite_labels(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], list[int], list[dict]]:
+def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], list[int], list[dict]]:
     """
     Transform data into a 2D matrix for heatmap.
     
@@ -94,7 +97,7 @@ def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarra
         df: Input DataFrame with composite_label
         
     Returns:
-        Tuple of (snap_matrix, target_matrix, target_share_matrix, row_labels, col_labels, grouping_info)
+        Tuple of (snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, completion_pct_matrix, row_labels, col_labels, grouping_info)
     """
     # Get unique weeks and sort them
     weeks = sorted(df['week'].unique().to_list())
@@ -123,6 +126,9 @@ def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarra
     snap_matrix = np.full((len(players), len(weeks)), np.nan)
     target_matrix = np.full((len(players), len(weeks)), np.nan)
     target_share_matrix = np.full((len(players), len(weeks)), np.nan)
+    avg_yac_matrix = np.full((len(players), len(weeks)), np.nan)
+    rush_first_downs_matrix = np.full((len(players), len(weeks)), np.nan)
+    completion_pct_matrix = np.full((len(players), len(weeks)), np.nan)
     
     # Fill matrices with values
     for i, player in enumerate(players):
@@ -131,22 +137,45 @@ def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarra
             week_data = player_data.filter(pl.col('week') == week)
             if len(week_data) > 0:
                 snap_matrix[i, j] = week_data['offense_snap_share'][0]
-                # Only store target data for WRs
-                if grouping_info[i]['position'] == 'WR':
+                position = grouping_info[i]['position']
+                
+                # Store target data for WRs, RBs, and TEs
+                if position in ['WR', 'RB', 'TE']:
                     targets = week_data['targets'][0]
                     target_share = week_data['percent_share_of_intended_air_yards'][0]
                     if targets is not None and not np.isnan(targets):
                         target_matrix[i, j] = targets
                     if target_share is not None and not np.isnan(target_share):
                         target_share_matrix[i, j] = target_share
+                
+                # Store avg_yac for WRs and TEs
+                if position in ['WR', 'TE']:
+                    avg_yac = week_data['avg_yac'][0]
+                    if avg_yac is not None and not np.isnan(avg_yac):
+                        avg_yac_matrix[i, j] = avg_yac
+                
+                # Store rush_first_downs for RBs
+                if position == 'RB':
+                    rush_fd = week_data['rush_first_downs'][0]
+                    if rush_fd is not None and not np.isnan(rush_fd):
+                        rush_first_downs_matrix[i, j] = rush_fd
+                
+                # Store completion_percentage for QBs
+                if position == 'QB':
+                    comp_pct = week_data['completion_percentage'][0]
+                    if comp_pct is not None and not np.isnan(comp_pct):
+                        completion_pct_matrix[i, j] = comp_pct
     
-    return snap_matrix, target_matrix, target_share_matrix, players, weeks, grouping_info
+    return snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, completion_pct_matrix, players, weeks, grouping_info
 
 
 def create_heatmap(
     snap_matrix: np.ndarray,
     target_matrix: np.ndarray,
     target_share_matrix: np.ndarray,
+    avg_yac_matrix: np.ndarray,
+    rush_first_downs_matrix: np.ndarray,
+    completion_pct_matrix: np.ndarray,
     row_labels: list[str],
     col_labels: list[int],
     grouping_info: list[dict],
@@ -159,8 +188,11 @@ def create_heatmap(
     
     Args:
         snap_matrix: 2D numpy array with snap share values
-        target_matrix: 2D numpy array with target counts for WRs
-        target_share_matrix: 2D numpy array with target share for WRs
+        target_matrix: 2D numpy array with target counts for WRs, RBs, TEs
+        target_share_matrix: 2D numpy array with target share for WRs, RBs, TEs
+        avg_yac_matrix: 2D numpy array with avg yards after catch for WRs, TEs
+        rush_first_downs_matrix: 2D numpy array with rush first downs for RBs
+        completion_pct_matrix: 2D numpy array with completion percentage for QBs
         row_labels: Player labels for y-axis
         col_labels: Week numbers for x-axis
         grouping_info: List of dicts with team/position info for each player
@@ -168,13 +200,13 @@ def create_heatmap(
         output_format: File format (png, jpg, pdf)
         dpi: DPI for output image
     """
-    # Expand matrices to include target rows for WRs
-    expanded_snap_matrix, expanded_target_share, expanded_targets, expanded_labels, expanded_grouping = \
-        expand_for_wr_targets(snap_matrix, target_matrix, target_share_matrix, row_labels, grouping_info)
+    # Expand matrices to include metric rows for all positions
+    expanded_snap_matrix, expanded_targets, expanded_target_share, expanded_avg_yac, expanded_rush_fd, expanded_comp_pct, expanded_labels, expanded_grouping = \
+        expand_for_position_metrics(snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, completion_pct_matrix, row_labels, grouping_info)
     
     # Calculate figure size based on data dimensions
     n_rows, n_cols = expanded_snap_matrix.shape
-    fig_width = max(12, n_cols * 0.6)
+    fig_width = max(8, n_cols * 0.4)  # Reduced from 0.6 to 0.4 for narrower cells
     fig_height = max(8, n_rows * 0.20)
     
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
@@ -189,24 +221,59 @@ def create_heatmap(
     
     buGn_cmap = plt.colormaps['BuGn']
     reds_cmap = plt.colormaps['Reds']
+    purples_cmap = plt.colormaps['Purples']
+    oranges_cmap = plt.colormaps['Oranges']
+    blues_cmap = plt.colormaps['Blues']
     
-    # Find max target count for normalization
+    # Find max values for normalization
     max_targets = np.nanmax(expanded_targets)
     if np.isnan(max_targets) or max_targets == 0:
-        max_targets = 15  # Default max for normalization
+        max_targets = 15
+    
+    max_yac = np.nanmax(expanded_avg_yac)
+    if np.isnan(max_yac) or max_yac == 0:
+        max_yac = 10
+    
+    max_rush_fd = np.nanmax(expanded_rush_fd)
+    if np.isnan(max_rush_fd) or max_rush_fd == 0:
+        max_rush_fd = 5
     
     for i in range(n_rows):
-        is_target_row = expanded_grouping[i].get('is_target_row', False)
+        metric_type = expanded_grouping[i].get('metric_type', None)
         for j in range(n_cols):
-            if is_target_row:
-                # Use Reds colormap based on target COUNT (not target share)
+            if metric_type == 'targets':
+                # Use Reds colormap based on target COUNT
                 target_count = expanded_targets[i, j]
                 if not np.isnan(target_count):
-                    # Normalize target count to 0-1 scale for colormap
                     normalized_value = min(target_count / max_targets, 1.0)
                     rgba_array[i, j, :] = reds_cmap(normalized_value)
                 else:
                     rgba_array[i, j, :] = [1, 1, 1, 1]  # White for NaN
+            elif metric_type == 'avg_yac':
+                # Use Purples colormap for avg YAC
+                yac_value = expanded_avg_yac[i, j]
+                if not np.isnan(yac_value):
+                    normalized_value = min(yac_value / max_yac, 1.0)
+                    rgba_array[i, j, :] = purples_cmap(normalized_value)
+                else:
+                    rgba_array[i, j, :] = [1, 1, 1, 1]
+            elif metric_type == 'rush_first_downs':
+                # Use Oranges colormap for rush first downs
+                rush_fd = expanded_rush_fd[i, j]
+                if not np.isnan(rush_fd):
+                    normalized_value = min(rush_fd / max_rush_fd, 1.0)
+                    rgba_array[i, j, :] = oranges_cmap(normalized_value)
+                else:
+                    rgba_array[i, j, :] = [1, 1, 1, 1]
+            elif metric_type == 'completion_percentage':
+                # Use Blues colormap for completion percentage (already 0-100)
+                comp_pct = expanded_comp_pct[i, j]
+                if not np.isnan(comp_pct):
+                    # Normalize from 0-100 to 0-1, but use 40-100 range for better contrast
+                    normalized_value = max(0, min((comp_pct - 40) / 60, 1.0))
+                    rgba_array[i, j, :] = blues_cmap(normalized_value)
+                else:
+                    rgba_array[i, j, :] = [1, 1, 1, 1]
             else:
                 # Use BuGn colormap for snap share
                 value = expanded_snap_matrix[i, j]
@@ -231,11 +298,11 @@ def create_heatmap(
     add_grouping_lines(ax, expanded_grouping, n_cols)
     
     # Add title
-    ax.set_title('2025 Offensive Snap Share by Week - Skill Positions (WR Target Rows Below Each WR)', 
+    ax.set_title('2025 Offensive Snap Share by Week - Skill Positions\n(QB: Comp%, RB: Targets/Rush 1st D, WR/TE: Targets/Avg YAC)', 
                  fontsize=14, fontweight='bold', pad=20)
     
-    # Add annotations - percentages for snap share, target counts for target rows
-    annotate_heatmap_with_targets(ax, expanded_snap_matrix, expanded_targets, expanded_grouping)
+    # Add annotations - percentages for snap share, metric values for metric rows
+    annotate_heatmap_with_metrics(ax, expanded_snap_matrix, expanded_targets, expanded_avg_yac, expanded_rush_fd, expanded_comp_pct, expanded_grouping)
     
     # Configure layout
     plt.tight_layout()
@@ -247,52 +314,124 @@ def create_heatmap(
     plt.close()
 
 
-def expand_for_wr_targets(
+def expand_for_position_metrics(
     snap_matrix: np.ndarray,
     target_matrix: np.ndarray,
     target_share_matrix: np.ndarray,
+    avg_yac_matrix: np.ndarray,
+    rush_first_downs_matrix: np.ndarray,
+    completion_pct_matrix: np.ndarray,
     row_labels: list[str],
     grouping_info: list[dict]
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], list[dict]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], list[dict]]:
     """
-    Expand matrices to include target rows for WRs.
+    Expand matrices to include metric rows for all positions.
+    - QB: completion_percentage row
+    - RB: targets row, rush_first_downs row
+    - WR: targets row, avg_yac row
+    - TE: targets row, avg_yac row
     
     Returns:
-        Tuple of (expanded_snap_matrix, expanded_target_share, expanded_targets, expanded_labels, expanded_grouping)
+        Tuple of (expanded_snap_matrix, expanded_targets, expanded_target_share, expanded_avg_yac, 
+                  expanded_rush_fd, expanded_comp_pct, expanded_labels, expanded_grouping)
     """
     n_rows, n_cols = snap_matrix.shape
-    wr_count = sum(1 for info in grouping_info if info['position'] == 'WR')
-    new_n_rows = n_rows + wr_count
+    
+    # Count additional rows needed for each position
+    extra_rows = 0
+    for info in grouping_info:
+        pos = info['position']
+        if pos == 'QB':
+            extra_rows += 1  # completion_percentage
+        elif pos == 'RB':
+            extra_rows += 2  # targets, rush_first_downs
+        elif pos in ['WR', 'TE']:
+            extra_rows += 2  # targets, avg_yac
+    
+    new_n_rows = n_rows + extra_rows
     
     # Create expanded matrices
     expanded_snap = np.full((new_n_rows, n_cols), np.nan)
-    expanded_target_share = np.full((new_n_rows, n_cols), np.nan)
     expanded_targets = np.full((new_n_rows, n_cols), np.nan)
+    expanded_target_share = np.full((new_n_rows, n_cols), np.nan)
+    expanded_avg_yac = np.full((new_n_rows, n_cols), np.nan)
+    expanded_rush_fd = np.full((new_n_rows, n_cols), np.nan)
+    expanded_comp_pct = np.full((new_n_rows, n_cols), np.nan)
     expanded_labels = []
     expanded_grouping = []
     
     new_row_idx = 0
     for i in range(n_rows):
+        pos = grouping_info[i]['position']
+        
         # Add the main player row
         expanded_snap[new_row_idx, :] = snap_matrix[i, :]
         expanded_labels.append(row_labels[i])
         expanded_grouping.append(grouping_info[i].copy())
         new_row_idx += 1
         
-        # If this is a WR, add a target row
-        if grouping_info[i]['position'] == 'WR':
-            expanded_target_share[new_row_idx, :] = target_share_matrix[i, :]
+        # Add position-specific metric rows
+        if pos == 'QB':
+            # Add completion_percentage row
+            expanded_comp_pct[new_row_idx, :] = completion_pct_matrix[i, :]
+            expanded_labels.append(f"  → Comp %")
+            expanded_grouping.append({
+                'player': f"{grouping_info[i]['player']}_comp_pct",
+                'team': grouping_info[i]['team'],
+                'position': 'QB',
+                'metric_type': 'completion_percentage'
+            })
+            new_row_idx += 1
+            
+        elif pos == 'RB':
+            # Add targets row
             expanded_targets[new_row_idx, :] = target_matrix[i, :]
+            expanded_target_share[new_row_idx, :] = target_share_matrix[i, :]
             expanded_labels.append(f"  → Targets")
             expanded_grouping.append({
                 'player': f"{grouping_info[i]['player']}_targets",
                 'team': grouping_info[i]['team'],
-                'position': 'WR',
-                'is_target_row': True
+                'position': 'RB',
+                'metric_type': 'targets'
+            })
+            new_row_idx += 1
+            
+            # Add rush_first_downs row
+            expanded_rush_fd[new_row_idx, :] = rush_first_downs_matrix[i, :]
+            expanded_labels.append(f"  → Rush 1st D")
+            expanded_grouping.append({
+                'player': f"{grouping_info[i]['player']}_rush_fd",
+                'team': grouping_info[i]['team'],
+                'position': 'RB',
+                'metric_type': 'rush_first_downs'
+            })
+            new_row_idx += 1
+            
+        elif pos in ['WR', 'TE']:
+            # Add targets row
+            expanded_targets[new_row_idx, :] = target_matrix[i, :]
+            expanded_target_share[new_row_idx, :] = target_share_matrix[i, :]
+            expanded_labels.append(f"  → Targets")
+            expanded_grouping.append({
+                'player': f"{grouping_info[i]['player']}_targets",
+                'team': grouping_info[i]['team'],
+                'position': pos,
+                'metric_type': 'targets'
+            })
+            new_row_idx += 1
+            
+            # Add avg_yac row
+            expanded_avg_yac[new_row_idx, :] = avg_yac_matrix[i, :]
+            expanded_labels.append(f"  → Avg YAC")
+            expanded_grouping.append({
+                'player': f"{grouping_info[i]['player']}_avg_yac",
+                'team': grouping_info[i]['team'],
+                'position': pos,
+                'metric_type': 'avg_yac'
             })
             new_row_idx += 1
     
-    return expanded_snap, expanded_target_share, expanded_targets, expanded_labels, expanded_grouping
+    return expanded_snap, expanded_targets, expanded_target_share, expanded_avg_yac, expanded_rush_fd, expanded_comp_pct, expanded_labels, expanded_grouping
 
 
 def add_grouping_lines(ax, grouping_info: list[dict], n_cols: int):
@@ -339,9 +478,10 @@ def color_code_player_labels(ax, grouping_info: list[dict]):
     for i, info in enumerate(grouping_info):
         position = info['position']
         
-        # Use lighter color for target rows
-        if info.get('is_target_row', False):
-            color = '#FFE4E1'  # Very light pink for target rows
+        # Use lighter color for metric rows
+        metric_type = info.get('metric_type', None)
+        if metric_type:
+            color = '#FFE4E1'  # Very light pink for metric rows
         else:
             color = position_colors.get(position, 'white')
         
@@ -353,39 +493,63 @@ def color_code_player_labels(ax, grouping_info: list[dict]):
                                   alpha=0.7))
 
 
-def annotate_heatmap_with_targets(ax, snap_data: np.ndarray, target_data: np.ndarray, 
-                                   grouping_info: list[dict], threshold: float = 0.5):
+def annotate_heatmap_with_metrics(ax, snap_data: np.ndarray, target_data: np.ndarray, 
+                                   avg_yac_data: np.ndarray, rush_fd_data: np.ndarray,
+                                   comp_pct_data: np.ndarray, grouping_info: list[dict], 
+                                   threshold: float = 0.5):
     """
     Add text annotations to heatmap cells with automatic color adjustment.
-    Shows percentages for snap share rows and target counts for target rows.
+    Shows percentages for snap share rows and metric values for metric rows.
     
     Args:
         ax: Matplotlib axes
         snap_data: 2D numpy array with snap share values
         target_data: 2D numpy array with target counts
+        avg_yac_data: 2D numpy array with avg yards after catch
+        rush_fd_data: 2D numpy array with rush first downs
+        comp_pct_data: 2D numpy array with completion percentage
         grouping_info: List of dicts with player/position info
         threshold: Threshold for switching text color (0-1)
     """
     texts = []
     for i in range(snap_data.shape[0]):
-        is_target_row = grouping_info[i].get('is_target_row', False)
+        metric_type = grouping_info[i].get('metric_type', None)
         
         for j in range(snap_data.shape[1]):
-            if is_target_row:
+            if metric_type == 'targets':
                 # For target rows, show target count
                 value = target_data[i, j]
                 if np.isnan(value):
                     continue
                 text_str = f'{int(value)}'
-                # Red gradient - darker for more targets
                 text_color = 'white' if value > 5 else 'black'
+            elif metric_type == 'avg_yac':
+                # For avg YAC rows, show value with 1 decimal
+                value = avg_yac_data[i, j]
+                if np.isnan(value):
+                    continue
+                text_str = f'{value:.1f}'
+                text_color = 'white' if value > 5 else 'black'
+            elif metric_type == 'rush_first_downs':
+                # For rush first downs, show count
+                value = rush_fd_data[i, j]
+                if np.isnan(value):
+                    continue
+                text_str = f'{int(value)}'
+                text_color = 'white' if value > 2 else 'black'
+            elif metric_type == 'completion_percentage':
+                # For completion percentage, show percentage
+                value = comp_pct_data[i, j]
+                if np.isnan(value):
+                    continue
+                text_str = f'{value:.0f}%'
+                text_color = 'white' if value > 65 else 'black'
             else:
                 # For snap share rows, show percentage
                 value = snap_data[i, j]
                 if np.isnan(value):
                     continue
                 text_str = f'{value * 100:.0f}%'
-                # BuGn gradient
                 text_color = 'white' if value > threshold else 'black'
             
             # Add text to cell
@@ -448,13 +612,13 @@ def main():
     
     # Pivot to matrix
     print("Pivoting data to matrix...")
-    snap_matrix, target_matrix, target_share_matrix, row_labels, col_labels, grouping_info = pivot_to_matrix(df)
+    snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, completion_pct_matrix, row_labels, col_labels, grouping_info = pivot_to_matrix(df)
     print(f"Matrix shape: {snap_matrix.shape[0]} players × {snap_matrix.shape[1]} weeks")
     
     # Create heatmap
     print("Generating heatmap...")
     create_heatmap(
-        snap_matrix, target_matrix, target_share_matrix,
+        snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, completion_pct_matrix,
         row_labels, col_labels, grouping_info,
         args.output, args.format, args.dpi
     )
