@@ -42,6 +42,7 @@ def load_and_filter_data(csv_path: str, min_games: int = 3) -> pl.DataFrame:
         'percent_share_of_intended_air_yards',
         'avg_yac',
         'rush_first_downs',
+        'receiving_first_downs',
         'completion_percentage'
     ])
     
@@ -89,7 +90,7 @@ def create_composite_labels(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], list[int], list[dict]]:
+def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], list[int], list[dict]]:
     """
     Transform data into a 2D matrix for heatmap.
     
@@ -97,7 +98,7 @@ def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarra
         df: Input DataFrame with composite_label
         
     Returns:
-        Tuple of (snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, completion_pct_matrix, row_labels, col_labels, grouping_info)
+        Tuple of (snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix, row_labels, col_labels, grouping_info)
     """
     # Get unique weeks and sort them
     weeks = sorted(df['week'].unique().to_list())
@@ -128,6 +129,7 @@ def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarra
     target_share_matrix = np.full((len(players), len(weeks)), np.nan)
     avg_yac_matrix = np.full((len(players), len(weeks)), np.nan)
     rush_first_downs_matrix = np.full((len(players), len(weeks)), np.nan)
+    receiving_first_downs_matrix = np.full((len(players), len(weeks)), np.nan)
     completion_pct_matrix = np.full((len(players), len(weeks)), np.nan)
     
     # Fill matrices with values
@@ -154,6 +156,12 @@ def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarra
                     if avg_yac is not None and not np.isnan(avg_yac):
                         avg_yac_matrix[i, j] = avg_yac
                 
+                # Store receiving_first_downs for WRs, RBs, and TEs
+                if position in ['WR', 'RB', 'TE']:
+                    rec_fd = week_data['receiving_first_downs'][0]
+                    if rec_fd is not None and not np.isnan(rec_fd):
+                        receiving_first_downs_matrix[i, j] = rec_fd
+                
                 # Store rush_first_downs for RBs
                 if position == 'RB':
                     rush_fd = week_data['rush_first_downs'][0]
@@ -166,7 +174,7 @@ def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarra
                     if comp_pct is not None and not np.isnan(comp_pct):
                         completion_pct_matrix[i, j] = comp_pct
     
-    return snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, completion_pct_matrix, players, weeks, grouping_info
+    return snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix, players, weeks, grouping_info
 
 
 def create_heatmap(
@@ -175,6 +183,7 @@ def create_heatmap(
     target_share_matrix: np.ndarray,
     avg_yac_matrix: np.ndarray,
     rush_first_downs_matrix: np.ndarray,
+    receiving_first_downs_matrix: np.ndarray,
     completion_pct_matrix: np.ndarray,
     row_labels: list[str],
     col_labels: list[int],
@@ -192,6 +201,7 @@ def create_heatmap(
         target_share_matrix: 2D numpy array with target share for WRs, RBs, TEs
         avg_yac_matrix: 2D numpy array with avg yards after catch for WRs, TEs
         rush_first_downs_matrix: 2D numpy array with rush first downs for RBs
+        receiving_first_downs_matrix: 2D numpy array with receiving first downs for WRs, RBs, TEs
         completion_pct_matrix: 2D numpy array with completion percentage for QBs
         row_labels: Player labels for y-axis
         col_labels: Week numbers for x-axis
@@ -201,8 +211,8 @@ def create_heatmap(
         dpi: DPI for output image
     """
     # Expand matrices to include metric rows for all positions
-    expanded_snap_matrix, expanded_targets, expanded_target_share, expanded_avg_yac, expanded_rush_fd, expanded_comp_pct, expanded_labels, expanded_grouping = \
-        expand_for_position_metrics(snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, completion_pct_matrix, row_labels, grouping_info)
+    expanded_snap_matrix, expanded_targets, expanded_target_share, expanded_avg_yac, expanded_rush_fd, expanded_rec_fd, expanded_comp_pct, expanded_labels, expanded_grouping = \
+        expand_for_position_metrics(snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix, row_labels, grouping_info)
     
     # Calculate figure size based on data dimensions
     n_rows, n_cols = expanded_snap_matrix.shape
@@ -213,17 +223,38 @@ def create_heatmap(
     
     # Create combined matrix for visualization using pcolormesh with custom colors
     # This allows us to use different colormaps for different rows
-    from matplotlib.colors import ListedColormap
+    from matplotlib.colors import ListedColormap, LinearSegmentedColormap
     import matplotlib.cm as cm
+    
+    # Create custom colormaps with gradients from low to high saturation
+    # All start from white/light and go to the target color
+    
+    # snap_share: #50514F (dark gray) - low saturation to high saturation
+    snap_colors = ['#F5F5F5', '#D0D0CF', '#ABABAA', '#868785', '#50514F']
+    snap_cmap = LinearSegmentedColormap.from_list('snap_gradient', snap_colors, N=256)
+    
+    # targets: #F25F5C (red) - low saturation to high saturation
+    target_colors = ['#FEFEFE', '#FCCECD', '#FA9D9B', '#F66D69', '#F25F5C']
+    target_cmap = LinearSegmentedColormap.from_list('target_gradient', target_colors, N=256)
+    
+    # receiving_first_downs: #70C1B3 (teal) - low saturation to high saturation
+    rec_fd_colors = ['#FEFEFE', '#D9F0EC', '#B3E1D9', '#8CD1C6', '#70C1B3']
+    rec_fd_cmap = LinearSegmentedColormap.from_list('rec_fd_gradient', rec_fd_colors, N=256)
+    
+    # rush_first_downs: #247BA0 (blue) - low saturation to high saturation
+    rush_fd_colors = ['#FEFEFE', '#C8DDE8', '#91BBD2', '#5A99BB', '#247BA0']
+    rush_fd_cmap = LinearSegmentedColormap.from_list('rush_fd_gradient', rush_fd_colors, N=256)
+    
+    # avg_yac: #EDCB96 (tan/beige) - low saturation to high saturation
+    yac_colors = ['#FEFEFE', '#F9F0E5', '#F6E5CB', '#F3DAB1', '#EDCB96']
+    yac_cmap = LinearSegmentedColormap.from_list('yac_gradient', yac_colors, N=256)
+    
+    # For completion percentage (QB), keep a reasonable color scheme
+    comp_colors = ['#FEFEFE', '#C8DDE8', '#91BBD2', '#5A99BB', '#247BA0']
+    comp_cmap = LinearSegmentedColormap.from_list('comp_gradient', comp_colors, N=256)
     
     # Create RGB array for the heatmap
     rgba_array = np.zeros((n_rows, n_cols, 4))
-    
-    buGn_cmap = plt.colormaps['BuGn']
-    reds_cmap = plt.colormaps['Reds']
-    purples_cmap = plt.colormaps['Purples']
-    oranges_cmap = plt.colormaps['Oranges']
-    blues_cmap = plt.colormaps['Blues']
     
     # Find max values for normalization
     max_targets = np.nanmax(expanded_targets)
@@ -238,47 +269,59 @@ def create_heatmap(
     if np.isnan(max_rush_fd) or max_rush_fd == 0:
         max_rush_fd = 5
     
+    max_rec_fd = np.nanmax(expanded_rec_fd)
+    if np.isnan(max_rec_fd) or max_rec_fd == 0:
+        max_rec_fd = 5
+    
     for i in range(n_rows):
         metric_type = expanded_grouping[i].get('metric_type', None)
         for j in range(n_cols):
             if metric_type == 'targets':
-                # Use Reds colormap based on target COUNT
+                # Use custom red gradient based on target COUNT
                 target_count = expanded_targets[i, j]
                 if not np.isnan(target_count):
                     normalized_value = min(target_count / max_targets, 1.0)
-                    rgba_array[i, j, :] = reds_cmap(normalized_value)
+                    rgba_array[i, j, :] = target_cmap(normalized_value)
                 else:
                     rgba_array[i, j, :] = [1, 1, 1, 1]  # White for NaN
             elif metric_type == 'avg_yac':
-                # Use Purples colormap for avg YAC
+                # Use custom tan/beige gradient for avg YAC
                 yac_value = expanded_avg_yac[i, j]
                 if not np.isnan(yac_value):
                     normalized_value = min(yac_value / max_yac, 1.0)
-                    rgba_array[i, j, :] = purples_cmap(normalized_value)
+                    rgba_array[i, j, :] = yac_cmap(normalized_value)
                 else:
                     rgba_array[i, j, :] = [1, 1, 1, 1]
             elif metric_type == 'rush_first_downs':
-                # Use Oranges colormap for rush first downs
+                # Use custom blue gradient for rush first downs
                 rush_fd = expanded_rush_fd[i, j]
                 if not np.isnan(rush_fd):
                     normalized_value = min(rush_fd / max_rush_fd, 1.0)
-                    rgba_array[i, j, :] = oranges_cmap(normalized_value)
+                    rgba_array[i, j, :] = rush_fd_cmap(normalized_value)
+                else:
+                    rgba_array[i, j, :] = [1, 1, 1, 1]
+            elif metric_type == 'receiving_first_downs':
+                # Use custom teal gradient for receiving first downs
+                rec_fd = expanded_rec_fd[i, j]
+                if not np.isnan(rec_fd):
+                    normalized_value = min(rec_fd / max_rec_fd, 1.0)
+                    rgba_array[i, j, :] = rec_fd_cmap(normalized_value)
                 else:
                     rgba_array[i, j, :] = [1, 1, 1, 1]
             elif metric_type == 'completion_percentage':
-                # Use Blues colormap for completion percentage (already 0-100)
+                # Use custom gradient for completion percentage (already 0-100)
                 comp_pct = expanded_comp_pct[i, j]
                 if not np.isnan(comp_pct):
                     # Normalize from 0-100 to 0-1, but use 40-100 range for better contrast
                     normalized_value = max(0, min((comp_pct - 40) / 60, 1.0))
-                    rgba_array[i, j, :] = blues_cmap(normalized_value)
+                    rgba_array[i, j, :] = comp_cmap(normalized_value)
                 else:
                     rgba_array[i, j, :] = [1, 1, 1, 1]
             else:
-                # Use BuGn colormap for snap share
+                # Use custom dark gray gradient for snap share
                 value = expanded_snap_matrix[i, j]
                 if not np.isnan(value):
-                    rgba_array[i, j, :] = buGn_cmap(value)
+                    rgba_array[i, j, :] = snap_cmap(value)
                 else:
                     rgba_array[i, j, :] = [1, 1, 1, 1]  # White for NaN
     
@@ -298,11 +341,11 @@ def create_heatmap(
     add_grouping_lines(ax, expanded_grouping, n_cols)
     
     # Add title
-    ax.set_title('2025 Offensive Snap Share by Week - Skill Positions\n(QB: Comp%, RB: Targets/Rush 1st Down, WR/TE: Targets/Avg YAC)', 
+    ax.set_title('2025 Offensive Snap Share by Week - Skill Positions\n(QB: Comp%, RB: Targets/Rush 1st Down/Rec 1st Down, WR/TE: Targets/Avg YAC/Rec 1st Down)', 
                  fontsize=14, fontweight='bold', pad=20)
     
     # Add annotations - percentages for snap share, metric values for metric rows
-    annotate_heatmap_with_metrics(ax, expanded_snap_matrix, expanded_targets, expanded_avg_yac, expanded_rush_fd, expanded_comp_pct, expanded_grouping)
+    annotate_heatmap_with_metrics(ax, expanded_snap_matrix, expanded_targets, expanded_avg_yac, expanded_rush_fd, expanded_rec_fd, expanded_comp_pct, expanded_grouping)
     
     # Configure layout
     plt.tight_layout()
@@ -320,20 +363,21 @@ def expand_for_position_metrics(
     target_share_matrix: np.ndarray,
     avg_yac_matrix: np.ndarray,
     rush_first_downs_matrix: np.ndarray,
+    receiving_first_downs_matrix: np.ndarray,
     completion_pct_matrix: np.ndarray,
     row_labels: list[str],
     grouping_info: list[dict]
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], list[dict]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], list[dict]]:
     """
     Expand matrices to include metric rows for all positions.
     - QB: completion_percentage row
-    - RB: targets row, rush_first_downs row
-    - WR: targets row, avg_yac row
-    - TE: targets row, avg_yac row
+    - RB: targets row, rush_first_downs row, receiving_first_downs row
+    - WR: targets row, avg_yac row, receiving_first_downs row
+    - TE: targets row, avg_yac row, receiving_first_downs row
     
     Returns:
         Tuple of (expanded_snap_matrix, expanded_targets, expanded_target_share, expanded_avg_yac, 
-                  expanded_rush_fd, expanded_comp_pct, expanded_labels, expanded_grouping)
+                  expanded_rush_fd, expanded_rec_fd, expanded_comp_pct, expanded_labels, expanded_grouping)
     """
     n_rows, n_cols = snap_matrix.shape
     
@@ -344,9 +388,9 @@ def expand_for_position_metrics(
         if pos == 'QB':
             extra_rows += 1  # completion_percentage
         elif pos == 'RB':
-            extra_rows += 2  # targets, rush_first_downs
+            extra_rows += 3  # targets, rush_first_downs, receiving_first_downs
         elif pos in ['WR', 'TE']:
-            extra_rows += 2  # targets, avg_yac
+            extra_rows += 3  # targets, avg_yac, receiving_first_downs
     
     new_n_rows = n_rows + extra_rows
     
@@ -356,6 +400,7 @@ def expand_for_position_metrics(
     expanded_target_share = np.full((new_n_rows, n_cols), np.nan)
     expanded_avg_yac = np.full((new_n_rows, n_cols), np.nan)
     expanded_rush_fd = np.full((new_n_rows, n_cols), np.nan)
+    expanded_rec_fd = np.full((new_n_rows, n_cols), np.nan)
     expanded_comp_pct = np.full((new_n_rows, n_cols), np.nan)
     expanded_labels = []
     expanded_grouping = []
@@ -407,6 +452,17 @@ def expand_for_position_metrics(
             })
             new_row_idx += 1
             
+            # Add receiving_first_downs row
+            expanded_rec_fd[new_row_idx, :] = receiving_first_downs_matrix[i, :]
+            expanded_labels.append(f"  → Rec 1st D")
+            expanded_grouping.append({
+                'player': f"{grouping_info[i]['player']}_rec_fd",
+                'team': grouping_info[i]['team'],
+                'position': 'RB',
+                'metric_type': 'receiving_first_downs'
+            })
+            new_row_idx += 1
+            
         elif pos in ['WR', 'TE']:
             # Add targets row
             expanded_targets[new_row_idx, :] = target_matrix[i, :]
@@ -430,13 +486,24 @@ def expand_for_position_metrics(
                 'metric_type': 'avg_yac'
             })
             new_row_idx += 1
+            
+            # Add receiving_first_downs row
+            expanded_rec_fd[new_row_idx, :] = receiving_first_downs_matrix[i, :]
+            expanded_labels.append(f"  → Rec 1st D")
+            expanded_grouping.append({
+                'player': f"{grouping_info[i]['player']}_rec_fd",
+                'team': grouping_info[i]['team'],
+                'position': pos,
+                'metric_type': 'receiving_first_downs'
+            })
+            new_row_idx += 1
     
-    return expanded_snap, expanded_targets, expanded_target_share, expanded_avg_yac, expanded_rush_fd, expanded_comp_pct, expanded_labels, expanded_grouping
+    return expanded_snap, expanded_targets, expanded_target_share, expanded_avg_yac, expanded_rush_fd, expanded_rec_fd, expanded_comp_pct, expanded_labels, expanded_grouping
 
 
 def add_grouping_lines(ax, grouping_info: list[dict], n_cols: int):
     """
-    Add horizontal lines to separate teams and positions.
+    Add horizontal lines to separate teams and positions with team labels.
     
     Args:
         ax: Matplotlib axes
@@ -447,15 +514,29 @@ def add_grouping_lines(ax, grouping_info: list[dict], n_cols: int):
     prev_position = None
     
     for i, info in enumerate(grouping_info):
-        # Add thick line between teams
+        # Add thick line and team label between teams
         if prev_team is not None and info['team'] != prev_team:
-            ax.axhline(y=i - 0.5, color='black', linewidth=2.5, linestyle='-')
+            ax.axhline(y=i - 0.5, color='black', linewidth=3.5, linestyle='-')
+            
+            # Add team label on the left side of the plot
+            # Position it at the line between teams
+            ax.text(-0.5, i - 0.5, f" {prev_team} ", 
+                   ha='right', va='center', fontsize=9, fontweight='bold',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
+                           edgecolor='black', linewidth=1.5))
         # Add thin line between positions within same team
         elif prev_position is not None and info['position'] != prev_position:
             ax.axhline(y=i - 0.5, color='gray', linewidth=1, linestyle='--', alpha=0.6)
         
         prev_team = info['team']
         prev_position = info['position']
+    
+    # Add label for the last team at the bottom
+    if prev_team is not None:
+        ax.text(-0.5, len(grouping_info) - 0.5, f" {prev_team} ", 
+               ha='right', va='center', fontsize=9, fontweight='bold',
+               bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
+                       edgecolor='black', linewidth=1.5))
 
 
 def color_code_player_labels(ax, grouping_info: list[dict]):
@@ -495,8 +576,8 @@ def color_code_player_labels(ax, grouping_info: list[dict]):
 
 def annotate_heatmap_with_metrics(ax, snap_data: np.ndarray, target_data: np.ndarray, 
                                    avg_yac_data: np.ndarray, rush_fd_data: np.ndarray,
-                                   comp_pct_data: np.ndarray, grouping_info: list[dict], 
-                                   threshold: float = 0.5):
+                                   rec_fd_data: np.ndarray, comp_pct_data: np.ndarray, 
+                                   grouping_info: list[dict], threshold: float = 0.5):
     """
     Add text annotations to heatmap cells with automatic color adjustment.
     Shows percentages for snap share rows and metric values for metric rows.
@@ -507,6 +588,7 @@ def annotate_heatmap_with_metrics(ax, snap_data: np.ndarray, target_data: np.nda
         target_data: 2D numpy array with target counts
         avg_yac_data: 2D numpy array with avg yards after catch
         rush_fd_data: 2D numpy array with rush first downs
+        rec_fd_data: 2D numpy array with receiving first downs
         comp_pct_data: 2D numpy array with completion percentage
         grouping_info: List of dicts with player/position info
         threshold: Threshold for switching text color (0-1)
@@ -533,6 +615,13 @@ def annotate_heatmap_with_metrics(ax, snap_data: np.ndarray, target_data: np.nda
             elif metric_type == 'rush_first_downs':
                 # For rush first downs, show count
                 value = rush_fd_data[i, j]
+                if np.isnan(value):
+                    continue
+                text_str = f'{int(value)}'
+                text_color = 'white' if value > 2 else 'black'
+            elif metric_type == 'receiving_first_downs':
+                # For receiving first downs, show count
+                value = rec_fd_data[i, j]
                 if np.isnan(value):
                     continue
                 text_str = f'{int(value)}'
@@ -612,13 +701,13 @@ def main():
     
     # Pivot to matrix
     print("Pivoting data to matrix...")
-    snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, completion_pct_matrix, row_labels, col_labels, grouping_info = pivot_to_matrix(df)
+    snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix, row_labels, col_labels, grouping_info = pivot_to_matrix(df)
     print(f"Matrix shape: {snap_matrix.shape[0]} players × {snap_matrix.shape[1]} weeks")
     
     # Create heatmap
     print("Generating heatmap...")
     create_heatmap(
-        snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, completion_pct_matrix,
+        snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix,
         row_labels, col_labels, grouping_info,
         args.output, args.format, args.dpi
     )
