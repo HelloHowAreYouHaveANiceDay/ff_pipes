@@ -11,6 +11,11 @@ import numpy as np
 import polars as pl
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+import xml.etree.ElementTree as ET
+import matplotlib.cm as cm
+import matplotlib.colors as colors
+import subprocess
+import shutil
 
 
 def load_and_filter_data(csv_path: str, min_games: int = 3) -> pl.DataFrame:
@@ -175,6 +180,364 @@ def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarra
                         completion_pct_matrix[i, j] = comp_pct
     
     return snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix, players, weeks, grouping_info
+
+
+def create_svg_heatmap(
+    snap_matrix: np.ndarray,
+    target_matrix: np.ndarray,
+    target_share_matrix: np.ndarray,
+    avg_yac_matrix: np.ndarray,
+    rush_first_downs_matrix: np.ndarray,
+    receiving_first_downs_matrix: np.ndarray,
+    completion_pct_matrix: np.ndarray,
+    row_labels: list[str],
+    col_labels: list[int],
+    grouping_info: list[dict],
+    output_path: str
+):
+    """
+    Create an optimized SVG heatmap with per-cell accessibility metadata.
+    
+    Args:
+        snap_matrix: 2D numpy array with snap share values
+        target_matrix: 2D numpy array with target counts
+        target_share_matrix: 2D numpy array with target share
+        avg_yac_matrix: 2D numpy array with avg yards after catch
+        rush_first_downs_matrix: 2D numpy array with rush first downs
+        receiving_first_downs_matrix: 2D numpy array with receiving first downs
+        completion_pct_matrix: 2D numpy array with completion percentage
+        row_labels: Player labels for y-axis
+        col_labels: Week numbers for x-axis
+        grouping_info: List of dicts with team/position info
+        output_path: Path to save the SVG file
+    """
+    # Expand matrices for position metrics
+    expanded_snap_matrix, expanded_targets, expanded_target_share, expanded_avg_yac, expanded_rush_fd, expanded_rec_fd, expanded_comp_pct, expanded_labels, expanded_grouping = \
+        expand_for_position_metrics(snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix, row_labels, grouping_info)
+    
+    n_rows, n_cols = expanded_snap_matrix.shape
+    
+    # Define cell dimensions for better readability
+    cell_width = 50
+    cell_height = 20
+    margin_left = 150
+    margin_top = 80
+    margin_right = 20
+    margin_bottom = 60
+    
+    svg_width = margin_left + (n_cols * cell_width) + margin_right
+    svg_height = margin_top + (n_rows * cell_height) + margin_bottom
+    
+    # Create SVG root element with accessibility attributes
+    svg = ET.Element('svg', {
+        'xmlns': 'http://www.w3.org/2000/svg',
+        'viewBox': f'0 0 {svg_width} {svg_height}',
+        'preserveAspectRatio': 'xMidYMid meet',
+        'role': 'img',
+        'aria-labelledby': 'title desc'
+    })
+    
+    # Add title and description for accessibility
+    title = ET.SubElement(svg, 'title', {'id': 'title'})
+    title.text = '2025 Offensive Snap Share Heatmap - Skill Positions'
+    
+    desc = ET.SubElement(svg, 'desc', {'id': 'desc'})
+    desc.text = 'Heatmap showing offensive snap share percentages by week for NFL skill position players (QB, RB, WR, TE). Each cell is colored by snap share percentage, with darker colors indicating higher snap share. Additional metrics shown include targets, yards after catch, first downs, and completion percentage.'
+    
+    # Define color gradients (matching the matplotlib implementation)
+    snap_colors = ['#F5F5F5', '#D0D0CF', '#ABABAA', '#868785', '#50514F']
+    target_colors = ['#FEFEFE', '#FCCECD', '#FA9D9B', '#F66D69', '#F25F5C']
+    rec_fd_colors = ['#FEFEFE', '#D9F0EC', '#B3E1D9', '#8CD1C6', '#70C1B3']
+    rush_fd_colors = ['#FEFEFE', '#C8DDE8', '#91BBD2', '#5A99BB', '#247BA0']
+    yac_colors = ['#FEFEFE', '#F9F0E5', '#F6E5CB', '#F3DAB1', '#EDCB96']
+    comp_colors = ['#FEFEFE', '#C8DDE8', '#91BBD2', '#5A99BB', '#247BA0']
+    
+    # Create colormaps
+    snap_cmap = colors.LinearSegmentedColormap.from_list('snap_gradient', snap_colors, N=256)
+    target_cmap = colors.LinearSegmentedColormap.from_list('target_gradient', target_colors, N=256)
+    rec_fd_cmap = colors.LinearSegmentedColormap.from_list('rec_fd_gradient', rec_fd_colors, N=256)
+    rush_fd_cmap = colors.LinearSegmentedColormap.from_list('rush_fd_gradient', rush_fd_colors, N=256)
+    yac_cmap = colors.LinearSegmentedColormap.from_list('yac_gradient', yac_colors, N=256)
+    comp_cmap = colors.LinearSegmentedColormap.from_list('comp_gradient', comp_colors, N=256)
+    
+    # Find max values for normalization
+    max_targets = np.nanmax(expanded_targets)
+    if np.isnan(max_targets) or max_targets == 0:
+        max_targets = 15
+    max_yac = np.nanmax(expanded_avg_yac)
+    if np.isnan(max_yac) or max_yac == 0:
+        max_yac = 10
+    max_rush_fd = np.nanmax(expanded_rush_fd)
+    if np.isnan(max_rush_fd) or max_rush_fd == 0:
+        max_rush_fd = 5
+    max_rec_fd = np.nanmax(expanded_rec_fd)
+    if np.isnan(max_rec_fd) or max_rec_fd == 0:
+        max_rec_fd = 5
+    
+    # Create a group for the heatmap cells
+    cells_group = ET.SubElement(svg, 'g', {'id': 'heatmap-cells'})
+    
+    # Draw cells
+    for i in range(n_rows):
+        metric_type = expanded_grouping[i].get('metric_type', None)
+        player = expanded_grouping[i]['player']
+        position = expanded_grouping[i]['position']
+        
+        for j in range(n_cols):
+            week = col_labels[j]
+            x = margin_left + (j * cell_width)
+            y = margin_top + (i * cell_height)
+            
+            # Determine color and value based on metric type
+            if metric_type == 'targets':
+                target_count = expanded_targets[i, j]
+                if not np.isnan(target_count):
+                    normalized_value = min(target_count / max_targets, 1.0)
+                    rgba = target_cmap(normalized_value)
+                    value_text = f'{int(target_count)}'
+                    description = f'Week {week}: {player} - {int(target_count)} targets'
+                else:
+                    rgba = [1, 1, 1, 1]
+                    value_text = ''
+                    description = f'Week {week}: {player} - No data'
+            elif metric_type == 'avg_yac':
+                yac_value = expanded_avg_yac[i, j]
+                if not np.isnan(yac_value):
+                    normalized_value = min(yac_value / max_yac, 1.0)
+                    rgba = yac_cmap(normalized_value)
+                    value_text = f'{yac_value:.1f}'
+                    description = f'Week {week}: {player} - {yac_value:.1f} avg yards after catch'
+                else:
+                    rgba = [1, 1, 1, 1]
+                    value_text = ''
+                    description = f'Week {week}: {player} - No data'
+            elif metric_type == 'rush_first_downs':
+                rush_fd = expanded_rush_fd[i, j]
+                if not np.isnan(rush_fd):
+                    normalized_value = min(rush_fd / max_rush_fd, 1.0)
+                    rgba = rush_fd_cmap(normalized_value)
+                    value_text = f'{int(rush_fd)}'
+                    description = f'Week {week}: {player} - {int(rush_fd)} rush first downs'
+                else:
+                    rgba = [1, 1, 1, 1]
+                    value_text = ''
+                    description = f'Week {week}: {player} - No data'
+            elif metric_type == 'receiving_first_downs':
+                rec_fd = expanded_rec_fd[i, j]
+                if not np.isnan(rec_fd):
+                    normalized_value = min(rec_fd / max_rec_fd, 1.0)
+                    rgba = rec_fd_cmap(normalized_value)
+                    value_text = f'{int(rec_fd)}'
+                    description = f'Week {week}: {player} - {int(rec_fd)} receiving first downs'
+                else:
+                    rgba = [1, 1, 1, 1]
+                    value_text = ''
+                    description = f'Week {week}: {player} - No data'
+            elif metric_type == 'completion_percentage':
+                comp_pct = expanded_comp_pct[i, j]
+                if not np.isnan(comp_pct):
+                    normalized_value = max(0, min((comp_pct - 40) / 60, 1.0))
+                    rgba = comp_cmap(normalized_value)
+                    value_text = f'{comp_pct:.0f}%'
+                    description = f'Week {week}: {player} - {comp_pct:.0f}% completion percentage'
+                else:
+                    rgba = [1, 1, 1, 1]
+                    value_text = ''
+                    description = f'Week {week}: {player} - No data'
+            else:
+                # Snap share
+                value = expanded_snap_matrix[i, j]
+                if not np.isnan(value):
+                    rgba = snap_cmap(value)
+                    value_text = f'{value * 100:.0f}%'
+                    description = f'Week {week}: {player} ({position}) - {value * 100:.0f}% snap share'
+                else:
+                    rgba = [1, 1, 1, 1]
+                    value_text = ''
+                    description = f'Week {week}: {player} - No data'
+            
+            hexcol = colors.to_hex(rgba)
+            
+            # Create rect element with accessibility attributes
+            rect = ET.SubElement(cells_group, 'rect', {
+                'x': str(x),
+                'y': str(y),
+                'width': str(cell_width),
+                'height': str(cell_height),
+                'fill': hexcol,
+                'stroke': '#CCCCCC',
+                'stroke-width': '0.5',
+                'id': f'cell-{i}-{j}',
+                'data-player': player,
+                'data-week': str(week),
+                'data-position': position,
+                'data-value': value_text.strip('%'),
+                'aria-label': description
+            })
+            
+            # Add text annotation if there's a value
+            if value_text:
+                # Determine text color for readability
+                if metric_type == 'targets':
+                    text_color = 'white' if normalized_value > 0.4 else 'black'
+                elif metric_type == 'avg_yac':
+                    text_color = 'white' if normalized_value > 0.5 else 'black'
+                elif metric_type in ['rush_first_downs', 'receiving_first_downs']:
+                    text_color = 'white' if normalized_value > 0.4 else 'black'
+                elif metric_type == 'completion_percentage':
+                    text_color = 'white' if normalized_value > 0.5 else 'black'
+                else:
+                    # Snap share
+                    text_color = 'white' if expanded_snap_matrix[i, j] > 0.5 else 'black'
+                
+                text = ET.SubElement(cells_group, 'text', {
+                    'x': str(x + cell_width / 2),
+                    'y': str(y + cell_height / 2),
+                    'text-anchor': 'middle',
+                    'dominant-baseline': 'middle',
+                    'fill': text_color,
+                    'font-size': '10',
+                    'font-weight': 'bold',
+                    'font-family': 'Arial, sans-serif'
+                })
+                text.text = value_text
+    
+    # Add column labels (weeks)
+    labels_group = ET.SubElement(svg, 'g', {'id': 'column-labels'})
+    for j, week in enumerate(col_labels):
+        x = margin_left + (j * cell_width) + (cell_width / 2)
+        y = margin_top - 10
+        text = ET.SubElement(labels_group, 'text', {
+            'x': str(x),
+            'y': str(y),
+            'text-anchor': 'middle',
+            'fill': 'black',
+            'font-size': '12',
+            'font-family': 'Arial, sans-serif'
+        })
+        text.text = f'Week {week}'
+    
+    # Add row labels (players)
+    row_labels_group = ET.SubElement(svg, 'g', {'id': 'row-labels'})
+    position_colors = {
+        'QB': '#AED6F1',
+        'RB': '#FFDAB9',
+        'WR': '#FFB6C1',
+        'TE': '#DDA0DD'
+    }
+    
+    for i, label in enumerate(expanded_labels):
+        x = margin_left - 5
+        y = margin_top + (i * cell_height) + (cell_height / 2)
+        position = expanded_grouping[i]['position']
+        metric_type = expanded_grouping[i].get('metric_type', None)
+        
+        # Use lighter color for metric rows
+        if metric_type:
+            bg_color = '#FFE4E1'
+        else:
+            bg_color = position_colors.get(position, 'white')
+        
+        # Add background rectangle
+        bg_rect = ET.SubElement(row_labels_group, 'rect', {
+            'x': str(x - 145),
+            'y': str(y - 8),
+            'width': '140',
+            'height': '16',
+            'fill': bg_color,
+            'opacity': '0.7',
+            'rx': '3'
+        })
+        
+        text = ET.SubElement(row_labels_group, 'text', {
+            'x': str(x),
+            'y': str(y),
+            'text-anchor': 'end',
+            'dominant-baseline': 'middle',
+            'fill': 'black',
+            'font-size': '9',
+            'font-family': 'Arial, sans-serif'
+        })
+        text.text = label
+    
+    # Add title
+    title_text = ET.SubElement(svg, 'text', {
+        'x': str(svg_width / 2),
+        'y': '30',
+        'text-anchor': 'middle',
+        'fill': 'black',
+        'font-size': '16',
+        'font-weight': 'bold',
+        'font-family': 'Arial, sans-serif'
+    })
+    title_text.text = '2025 Offensive Snap Share by Week - Skill Positions'
+    
+    subtitle_text = ET.SubElement(svg, 'text', {
+        'x': str(svg_width / 2),
+        'y': '50',
+        'text-anchor': 'middle',
+        'fill': 'black',
+        'font-size': '10',
+        'font-family': 'Arial, sans-serif'
+    })
+    subtitle_text.text = '(QB: Comp%, RB: Targets/Rush 1st Down/Rec 1st Down, WR/TE: Targets/Avg YAC/Rec 1st Down)'
+    
+    # Write to file
+    tree = ET.ElementTree(svg)
+    ET.indent(tree, space='  ')
+    tree.write(output_path, encoding='utf-8', xml_declaration=True)
+    print(f"SVG heatmap saved to: {output_path}")
+    
+    # Get file size before optimization
+    file_size_before = Path(output_path).stat().st_size / (1024 * 1024)
+    print(f"  Size: {file_size_before:.2f} MB")
+    
+    # Optimize with SVGO if available
+    if shutil.which('svgo'):
+        print(f"Optimizing SVG with SVGO...")
+        try:
+            # Create temporary config file
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
+                f.write("""export default {
+  multipass: true,
+  plugins: [
+    'cleanupIds',
+    'removeMetadata',
+    'collapseGroups',
+    'removeEmptyContainers',
+    {
+      name: 'removeTitle',
+      active: false
+    },
+    {
+      name: 'removeDesc',
+      active: false
+    }
+  ]
+};""")
+                config_path = f.name
+            
+            # Run SVGO
+            result = subprocess.run(
+                ['svgo', '--config', config_path, output_path, '-o', output_path],
+                capture_output=True,
+                text=True
+            )
+            
+            # Clean up config file
+            Path(config_path).unlink()
+            
+            if result.returncode == 0:
+                file_size_after = Path(output_path).stat().st_size / (1024 * 1024)
+                reduction = ((file_size_before - file_size_after) / file_size_before) * 100
+                print(f"  Optimized: {file_size_after:.2f} MB ({reduction:.1f}% reduction)")
+            else:
+                print(f"  SVGO optimization failed: {result.stderr}")
+        except Exception as e:
+            print(f"  SVGO optimization error: {e}")
+    else:
+        print(f"  SVGO not found. Install with: npm install -g svgo")
 
 
 def create_heatmap(
@@ -672,7 +1035,7 @@ def main():
         '--format',
         type=str,
         default='png',
-        choices=['png', 'jpg', 'pdf'],
+        choices=['png', 'jpg', 'pdf', 'svg'],
         help='Output file format'
     )
     parser.add_argument(
@@ -706,11 +1069,23 @@ def main():
     
     # Create heatmap
     print("Generating heatmap...")
-    create_heatmap(
-        snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix,
-        row_labels, col_labels, grouping_info,
-        args.output, args.format, args.dpi
-    )
+    if args.format == 'svg':
+        # Generate SVG
+        svg_output = f"{args.output}.svg"
+        create_svg_heatmap(
+            snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, 
+            rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix,
+            row_labels, col_labels, grouping_info,
+            svg_output
+        )
+    else:
+        # Generate raster format (PNG/JPG/PDF)
+        create_heatmap(
+            snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, 
+            rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix,
+            row_labels, col_labels, grouping_info,
+            args.output, args.format, args.dpi
+        )
     
     print("Done!")
 
