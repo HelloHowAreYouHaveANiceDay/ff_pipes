@@ -11,15 +11,16 @@ import numpy as np
 import polars as pl
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+from matplotlib.backends.backend_pdf import PdfPages
 
 
-def load_and_filter_data(csv_path: str, min_games: int = 3) -> pl.DataFrame:
+def load_and_filter_data(csv_path: str, min_games: int = 1) -> pl.DataFrame:
     """
     Load opportunity report CSV and filter for skill positions.
     
     Args:
         csv_path: Path to the opportunity report CSV file
-        min_games: Minimum number of games a player must appear in
+        min_games: Minimum number of games a player-team combination must appear in
         
     Returns:
         Filtered polars DataFrame
@@ -49,16 +50,17 @@ def load_and_filter_data(csv_path: str, min_games: int = 3) -> pl.DataFrame:
     # Remove rows with null snap share
     df = df.filter(pl.col('offense_snap_share').is_not_null())
     
-    # Filter out players with too few appearances
-    player_game_counts = df.group_by('player_name').agg(
+    # Filter out player-team combinations with too few appearances
+    # This handles players who change teams during the season
+    player_team_game_counts = df.group_by(['player_name', 'team']).agg(
         pl.col('week').count().alias('games_played')
     )
     
-    valid_players = player_game_counts.filter(
+    valid_player_teams = player_team_game_counts.filter(
         pl.col('games_played') >= min_games
-    )['player_name'].to_list()
+    ).select(['player_name', 'team'])
     
-    df = df.filter(pl.col('player_name').is_in(valid_players))
+    df = df.join(valid_player_teams, on=['player_name', 'team'], how='inner')
     
     return df
 
@@ -67,6 +69,7 @@ def create_composite_labels(df: pl.DataFrame) -> pl.DataFrame:
     """
     Create player labels and prepare for hierarchical sorting.
     Players will be organized by team, then position (QB, RB, WR, TE), then player name.
+    For players who changed teams, they appear separately for each team.
     
     Args:
         df: Input DataFrame
@@ -74,9 +77,21 @@ def create_composite_labels(df: pl.DataFrame) -> pl.DataFrame:
     Returns:
         DataFrame with composite_label and sorting columns added
     """
-    # Use player name as label since grouping is visual
+    # Create composite label: player_name for single-team players, player_name (team) for multi-team
+    # First, identify players who played for multiple teams
+    player_team_counts = df.group_by('player_name').agg(
+        pl.col('team').n_unique().alias('team_count')
+    )
+    
+    # Join back to add team_count column
+    df = df.join(player_team_counts, on='player_name', how='left')
+    
+    # Create composite label: add team abbreviation for players on multiple teams
     df = df.with_columns(
-        pl.col('player_name').alias('composite_label')
+        pl.when(pl.col('team_count') > 1)
+        .then(pl.concat_str([pl.col('player_name'), pl.lit(' ('), pl.col('team'), pl.lit(')')]))
+        .otherwise(pl.col('player_name'))
+        .alias('composite_label')
     )
     
     # Add position order for sorting (QB, RB, WR, TE)
@@ -90,94 +105,159 @@ def create_composite_labels(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-def pivot_to_matrix(df: pl.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], list[int], list[dict]]:
+def pivot_to_matrix(df: pl.DataFrame) -> dict:
     """
-    Transform data into a 2D matrix for heatmap.
+    Transform data into a dictionary of 2D matrices grouped by team.
     
     Args:
         df: Input DataFrame with composite_label
         
     Returns:
-        Tuple of (snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix, row_labels, col_labels, grouping_info)
+        Dictionary mapping team names to tuples of (snap_matrix, target_matrix, target_share_matrix, 
+        avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix, 
+        row_labels, col_labels, grouping_info)
     """
     # Get unique weeks and sort them
     weeks = sorted(df['week'].unique().to_list())
     
-    # Calculate average snap share per player for sorting
-    # Sort by: team, then position (QB, RB, WR, TE), then avg snap share descending
-    player_stats = df.group_by(['composite_label', 'player_name']).agg([
-        pl.col('offense_snap_share').mean().alias('avg_snap'),
-        pl.col('pos_order').first().alias('pos_order'),
-        pl.col('team').first().alias('team'),
-        pl.col('position').first().alias('position')
-    ]).sort(['team', 'pos_order', 'avg_snap'], descending=[False, False, True])
+    # Get unique teams
+    teams = sorted(df['team'].unique().to_list())
     
-    players = player_stats['composite_label'].to_list()
+    team_data = {}
     
-    # Create grouping info for visual separators
-    grouping_info = []
-    for row in player_stats.iter_rows(named=True):
-        grouping_info.append({
-            'player': row['composite_label'],
-            'team': row['team'],
-            'position': row['position']
-        })
+    for team in teams:
+        # Filter data for this team
+        team_df = df.filter(pl.col('team') == team)
+        
+        # Calculate average snap share per player for sorting
+        # Sort by: position (QB, RB, WR, TE), then avg snap share descending
+        player_stats = team_df.group_by(['composite_label', 'player_name']).agg([
+            pl.col('offense_snap_share').mean().alias('avg_snap'),
+            pl.col('pos_order').first().alias('pos_order'),
+            pl.col('position').first().alias('position')
+        ]).sort(['pos_order', 'avg_snap'], descending=[False, True])
+        
+        players = player_stats['composite_label'].to_list()
+        
+        # Create grouping info for visual separators
+        grouping_info = []
+        for i, row in enumerate(player_stats.iter_rows(named=True)):
+            grouping_info.append({
+                'player': row['composite_label'],
+                'team': team,
+                'position': row['position']
+            })
+        
+        # Create matrices filled with NaN
+        snap_matrix = np.full((len(players), len(weeks)), np.nan)
+        target_matrix = np.full((len(players), len(weeks)), np.nan)
+        target_share_matrix = np.full((len(players), len(weeks)), np.nan)
+        avg_yac_matrix = np.full((len(players), len(weeks)), np.nan)
+        rush_first_downs_matrix = np.full((len(players), len(weeks)), np.nan)
+        receiving_first_downs_matrix = np.full((len(players), len(weeks)), np.nan)
+        completion_pct_matrix = np.full((len(players), len(weeks)), np.nan)
+        
+        # Fill matrices with values
+        for i, player in enumerate(players):
+            player_data = team_df.filter(pl.col('composite_label') == player)
+            for j, week in enumerate(weeks):
+                week_data = player_data.filter(pl.col('week') == week)
+                if len(week_data) > 0:
+                    snap_matrix[i, j] = week_data['offense_snap_share'][0]
+                    position = grouping_info[i]['position']
+                    
+                    # Store target data for WRs, RBs, and TEs
+                    if position in ['WR', 'RB', 'TE']:
+                        targets = week_data['targets'][0]
+                        target_share = week_data['percent_share_of_intended_air_yards'][0]
+                        if targets is not None and not np.isnan(targets):
+                            target_matrix[i, j] = targets
+                        if target_share is not None and not np.isnan(target_share):
+                            target_share_matrix[i, j] = target_share
+                    
+                    # Store avg_yac for WRs and TEs
+                    if position in ['WR', 'TE']:
+                        avg_yac = week_data['avg_yac'][0]
+                        if avg_yac is not None and not np.isnan(avg_yac):
+                            avg_yac_matrix[i, j] = avg_yac
+                    
+                    # Store receiving_first_downs for WRs, RBs, and TEs
+                    if position in ['WR', 'RB', 'TE']:
+                        rec_fd = week_data['receiving_first_downs'][0]
+                        if rec_fd is not None and not np.isnan(rec_fd):
+                            receiving_first_downs_matrix[i, j] = rec_fd
+                    
+                    # Store rush_first_downs for RBs
+                    if position == 'RB':
+                        rush_fd = week_data['rush_first_downs'][0]
+                        if rush_fd is not None and not np.isnan(rush_fd):
+                            rush_first_downs_matrix[i, j] = rush_fd
+                    
+                    # Store completion_percentage for QBs
+                    if position == 'QB':
+                        comp_pct = week_data['completion_percentage'][0]
+                        if comp_pct is not None and not np.isnan(comp_pct):
+                            completion_pct_matrix[i, j] = comp_pct
+        
+        team_data[team] = (
+            snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, 
+            rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix,
+            players, weeks, grouping_info
+        )
     
-    # Create matrices filled with NaN
-    snap_matrix = np.full((len(players), len(weeks)), np.nan)
-    target_matrix = np.full((len(players), len(weeks)), np.nan)
-    target_share_matrix = np.full((len(players), len(weeks)), np.nan)
-    avg_yac_matrix = np.full((len(players), len(weeks)), np.nan)
-    rush_first_downs_matrix = np.full((len(players), len(weeks)), np.nan)
-    receiving_first_downs_matrix = np.full((len(players), len(weeks)), np.nan)
-    completion_pct_matrix = np.full((len(players), len(weeks)), np.nan)
-    
-    # Fill matrices with values
-    for i, player in enumerate(players):
-        player_data = df.filter(pl.col('composite_label') == player)
-        for j, week in enumerate(weeks):
-            week_data = player_data.filter(pl.col('week') == week)
-            if len(week_data) > 0:
-                snap_matrix[i, j] = week_data['offense_snap_share'][0]
-                position = grouping_info[i]['position']
-                
-                # Store target data for WRs, RBs, and TEs
-                if position in ['WR', 'RB', 'TE']:
-                    targets = week_data['targets'][0]
-                    target_share = week_data['percent_share_of_intended_air_yards'][0]
-                    if targets is not None and not np.isnan(targets):
-                        target_matrix[i, j] = targets
-                    if target_share is not None and not np.isnan(target_share):
-                        target_share_matrix[i, j] = target_share
-                
-                # Store avg_yac for WRs and TEs
-                if position in ['WR', 'TE']:
-                    avg_yac = week_data['avg_yac'][0]
-                    if avg_yac is not None and not np.isnan(avg_yac):
-                        avg_yac_matrix[i, j] = avg_yac
-                
-                # Store receiving_first_downs for WRs, RBs, and TEs
-                if position in ['WR', 'RB', 'TE']:
-                    rec_fd = week_data['receiving_first_downs'][0]
-                    if rec_fd is not None and not np.isnan(rec_fd):
-                        receiving_first_downs_matrix[i, j] = rec_fd
-                
-                # Store rush_first_downs for RBs
-                if position == 'RB':
-                    rush_fd = week_data['rush_first_downs'][0]
-                    if rush_fd is not None and not np.isnan(rush_fd):
-                        rush_first_downs_matrix[i, j] = rush_fd
-                
-                # Store completion_percentage for QBs
-                if position == 'QB':
-                    comp_pct = week_data['completion_percentage'][0]
-                    if comp_pct is not None and not np.isnan(comp_pct):
-                        completion_pct_matrix[i, j] = comp_pct
-    
-    return snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix, players, weeks, grouping_info
+    return team_data
 
 
 def create_heatmap(
+    team_data: dict,
+    output_path: str,
+    output_format: str = 'pdf',
+    dpi: int = 300
+):
+    """
+    Create and save the heatmap visualization with one page per team.
+    
+    Args:
+        team_data: Dictionary mapping team names to tuples of matrices and labels
+        output_path: Path to save the output file
+        output_format: File format (png, jpg, pdf)
+        dpi: DPI for output image
+    """
+    output_file = f"{output_path}.{output_format}"
+    
+    if output_format == 'pdf':
+        # Create multi-page PDF
+        with PdfPages(output_file) as pdf:
+            for team_name in sorted(team_data.keys()):
+                snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, \
+                    rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix, \
+                    row_labels, col_labels, grouping_info = team_data[team_name]
+                
+                create_team_page(
+                    team_name, snap_matrix, target_matrix, target_share_matrix, 
+                    avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix,
+                    completion_pct_matrix, row_labels, col_labels, grouping_info, pdf, dpi
+                )
+        print(f"Multi-page PDF heatmap saved to: {output_file}")
+    else:
+        # For non-PDF formats, save each team as a separate file
+        for team_name in sorted(team_data.keys()):
+            snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, \
+                rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix, \
+                row_labels, col_labels, grouping_info = team_data[team_name]
+            
+            team_output_file = f"{output_path}_{team_name}.{output_format}"
+            create_team_page(
+                team_name, snap_matrix, target_matrix, target_share_matrix, 
+                avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix,
+                completion_pct_matrix, row_labels, col_labels, grouping_info, None, dpi,
+                team_output_file
+            )
+            print(f"Team heatmap saved to: {team_output_file}")
+
+
+def create_team_page(
+    team_name: str,
     snap_matrix: np.ndarray,
     target_matrix: np.ndarray,
     target_share_matrix: np.ndarray,
@@ -188,14 +268,15 @@ def create_heatmap(
     row_labels: list[str],
     col_labels: list[int],
     grouping_info: list[dict],
-    output_path: str,
-    output_format: str = 'png',
-    dpi: int = 300
+    pdf: PdfPages = None,
+    dpi: int = 300,
+    output_file: str = None
 ):
     """
-    Create and save the heatmap visualization.
+    Create a single heatmap page for one team.
     
     Args:
+        team_name: Name of the team
         snap_matrix: 2D numpy array with snap share values
         target_matrix: 2D numpy array with target counts for WRs, RBs, TEs
         target_share_matrix: 2D numpy array with target share for WRs, RBs, TEs
@@ -206,9 +287,9 @@ def create_heatmap(
         row_labels: Player labels for y-axis
         col_labels: Week numbers for x-axis
         grouping_info: List of dicts with team/position info for each player
-        output_path: Path to save the output file
-        output_format: File format (png, jpg, pdf)
+        pdf: PdfPages object if saving to multi-page PDF
         dpi: DPI for output image
+        output_file: Path to save file (if not using pdf object)
     """
     # Expand matrices to include metric rows for all positions
     expanded_snap_matrix, expanded_targets, expanded_target_share, expanded_avg_yac, expanded_rush_fd, expanded_rec_fd, expanded_comp_pct, expanded_labels, expanded_grouping = \
@@ -217,7 +298,7 @@ def create_heatmap(
     # Calculate figure size based on data dimensions
     n_rows, n_cols = expanded_snap_matrix.shape
     fig_width = max(8, n_cols * 0.3)  # Reduced from 0.6 to 0.3 (2x narrower)
-    fig_height = max(8, n_rows * 0.20)
+    fig_height = max(6, n_rows * 0.20)
     
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     
@@ -337,11 +418,11 @@ def create_heatmap(
     # Color-code player name backgrounds by position
     color_code_player_labels(ax, expanded_grouping)
     
-    # Add visual separators between teams and positions
+    # Add visual separators between positions
     add_grouping_lines(ax, expanded_grouping, n_cols)
     
-    # Add title
-    ax.set_title('2025 Offensive Snap Share by Week - Skill Positions\n(QB: Comp%, RB: Targets/Rush 1st Down/Rec 1st Down, WR/TE: Targets/Avg YAC/Rec 1st Down)', 
+    # Add title with team name
+    ax.set_title(f'{team_name} - 2025 Offensive Snap Share by Week\n(QB: Comp%, RB: Targets/Rush 1st Down/Rec 1st Down, WR/TE: Targets/Avg YAC/Rec 1st Down)', 
                  fontsize=14, fontweight='bold', pad=20)
     
     # Add annotations - percentages for snap share, metric values for metric rows
@@ -351,9 +432,13 @@ def create_heatmap(
     plt.tight_layout()
     
     # Save figure
-    output_file = f"{output_path}.{output_format}"
-    plt.savefig(output_file, dpi=dpi, bbox_inches='tight')
-    print(f"Heatmap saved to: {output_file}")
+    if pdf is not None:
+        # Save to multi-page PDF
+        pdf.savefig(fig, dpi=dpi, bbox_inches='tight')
+    elif output_file is not None:
+        # Save to individual file
+        plt.savefig(output_file, dpi=dpi, bbox_inches='tight')
+    
     plt.close()
 
 
@@ -503,40 +588,21 @@ def expand_for_position_metrics(
 
 def add_grouping_lines(ax, grouping_info: list[dict], n_cols: int):
     """
-    Add horizontal lines to separate teams and positions with team labels.
+    Add horizontal lines to separate positions within a team.
     
     Args:
         ax: Matplotlib axes
         grouping_info: List of dicts with team/position info for each player
         n_cols: Number of columns in the heatmap
     """
-    prev_team = None
     prev_position = None
     
     for i, info in enumerate(grouping_info):
-        # Add thick line and team label between teams
-        if prev_team is not None and info['team'] != prev_team:
-            ax.axhline(y=i - 0.5, color='black', linewidth=3.5, linestyle='-')
-            
-            # Add team label on the left side of the plot
-            # Position it at the line between teams
-            ax.text(-0.5, i - 0.5, f" {prev_team} ", 
-                   ha='right', va='center', fontsize=9, fontweight='bold',
-                   bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
-                           edgecolor='black', linewidth=1.5))
-        # Add thin line between positions within same team
-        elif prev_position is not None and info['position'] != prev_position:
-            ax.axhline(y=i - 0.5, color='gray', linewidth=1, linestyle='--', alpha=0.6)
+        # Add thin line between positions
+        if prev_position is not None and info['position'] != prev_position:
+            ax.axhline(y=i - 0.5, color='gray', linewidth=1.5, linestyle='-', alpha=0.7)
         
-        prev_team = info['team']
         prev_position = info['position']
-    
-    # Add label for the last team at the bottom
-    if prev_team is not None:
-        ax.text(-0.5, len(grouping_info) - 0.5, f" {prev_team} ", 
-               ha='right', va='center', fontsize=9, fontweight='bold',
-               bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
-                       edgecolor='black', linewidth=1.5))
 
 
 def color_code_player_labels(ax, grouping_info: list[dict]):
@@ -671,15 +737,15 @@ def main():
     parser.add_argument(
         '--format',
         type=str,
-        default='png',
+        default='pdf',
         choices=['png', 'jpg', 'pdf'],
         help='Output file format'
     )
     parser.add_argument(
         '--min-games',
         type=int,
-        default=3,
-        help='Minimum number of games a player must appear in'
+        default=1,
+        help='Minimum number of games a player-team combination must appear in'
     )
     parser.add_argument(
         '--dpi',
@@ -699,16 +765,15 @@ def main():
     print("Creating composite labels...")
     df = create_composite_labels(df)
     
-    # Pivot to matrix
-    print("Pivoting data to matrix...")
-    snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix, row_labels, col_labels, grouping_info = pivot_to_matrix(df)
-    print(f"Matrix shape: {snap_matrix.shape[0]} players × {snap_matrix.shape[1]} weeks")
+    # Pivot to matrix (grouped by team)
+    print("Pivoting data to matrices grouped by team...")
+    team_data = pivot_to_matrix(df)
+    print(f"Generated data for {len(team_data)} teams")
     
-    # Create heatmap
-    print("Generating heatmap...")
+    # Create heatmap (multi-page PDF or separate files)
+    print("Generating heatmaps...")
     create_heatmap(
-        snap_matrix, target_matrix, target_share_matrix, avg_yac_matrix, rush_first_downs_matrix, receiving_first_downs_matrix, completion_pct_matrix,
-        row_labels, col_labels, grouping_info,
+        team_data,
         args.output, args.format, args.dpi
     )
     
