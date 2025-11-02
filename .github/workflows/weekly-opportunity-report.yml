@@ -42,11 +42,23 @@ jobs:
 
           # Be resilient if no files match the glob
           shopt -s nullglob
-          files=(reports/*.csv)
-          if (( ${#files[@]} )); then
-            git add "${files[@]}"
+          csv_files=(reports/*.csv)
+          pdf_files=(reports/*.pdf)
+          
+          # Add CSV files
+          if (( ${#csv_files[@]} )); then
+            git add "${csv_files[@]}"
+            echo "Added ${#csv_files[@]} CSV file(s)."
           else
             echo "No new CSVs to add."
+          fi
+          
+          # Add PDF files
+          if (( ${#pdf_files[@]} )); then
+            git add "${pdf_files[@]}"
+            echo "Added ${#pdf_files[@]} PDF file(s)."
+          else
+            echo "No new PDFs to add."
           fi
 
           # Only commit when there are staged changes
